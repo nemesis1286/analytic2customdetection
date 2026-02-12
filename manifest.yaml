@@ -1,0 +1,114 @@
+Descriptor:
+  Name: SentinelAnalyticToXdrDetection
+  DisplayName: Sentinel Analytic to XDR Custom Detection
+  Description: >-
+    Scans active Microsoft Sentinel analytic rules to identify those
+    referencing Defender XDR advanced hunting tables, then converts and
+    deploys them as custom detection rules in Microsoft 365 Defender.
+    Helps organizations maximize their detection coverage by
+    automatically extending Sentinel analytics into the XDR platform.
+  Category: Security Operations
+  SupportedAuthTypes:
+    - OAuthAuthorizationCodeFlow
+  Authorization:
+    Type: OAuthAuthorizationCodeFlow
+    ClientId: "{{AZURE_CLIENT_ID}}"
+    AuthorizationEndpoint: "https://login.microsoftonline.com/{{AZURE_TENANT_ID}}/oauth2/v2.0/authorize"
+    TokenEndpoint: "https://login.microsoftonline.com/{{AZURE_TENANT_ID}}/oauth2/v2.0/token"
+    Scopes: "https://graph.microsoft.com/.default https://management.azure.com/.default"
+
+SkillGroups:
+  - Format: API
+    Settings:
+      OpenApiSpecUrl: "https://{{FUNCTION_APP_NAME}}.azurewebsites.net/api/openapi.yaml"
+    Skills:
+      - Name: ScanAnalyticRules
+        DisplayName: Scan Sentinel Analytic Rules for XDR Tables
+        Description: >-
+          Scans all active Sentinel analytic rules in the configured
+          workspace and identifies rules whose KQL queries reference
+          Defender XDR advanced hunting tables (DeviceEvents, EmailEvents,
+          IdentityLogonEvents, etc.).  Returns a detailed report showing
+          which rules are eligible for conversion to XDR custom detections,
+          including the specific XDR tables referenced and MITRE ATT&CK
+          mappings.
+        ExamplePrompts:
+          - Scan my Sentinel analytic rules for Defender XDR table references
+          - Which of my Sentinel rules use Defender XDR tables?
+          - Show me analytics that reference advanced hunting tables
+          - Find Sentinel rules eligible for XDR custom detection conversion
+          - List all analytic rules that query DeviceEvents or EmailEvents
+        Inputs: []
+        Outputs:
+          - Name: totalActiveRules
+            Description: Total number of active analytic rules in the workspace
+          - Name: rulesWithXdrTables
+            Description: Number of rules referencing XDR tables
+          - Name: eligibleRules
+            Description: Detailed list of eligible rules with XDR table references
+
+      - Name: ConvertRules
+        DisplayName: Convert Sentinel Rules to XDR Custom Detections
+        Description: >-
+          Converts eligible Sentinel analytic rules to Defender XDR custom
+          detection rule format.  Performs a dry-run conversion without
+          deploying — shows the converted rule payloads including adapted
+          KQL queries, frequency mapping, severity, and MITRE ATT&CK
+          mappings.  Use this to preview changes before deployment.
+        ExamplePrompts:
+          - Convert my Sentinel rules to XDR custom detections
+          - Preview the XDR custom detection rules that would be created
+          - Show me what the converted detection rules would look like
+          - Dry run the Sentinel to XDR rule conversion
+        Inputs:
+          - Name: ruleIds
+            Description: >-
+              Optional list of specific Sentinel rule IDs to convert.
+              If not provided, all eligible rules are converted.
+            Required: false
+          - Name: prefix
+            Description: >-
+              Prefix to add to converted rule display names for traceability.
+              Defaults to "[Sentinel] ".
+            Required: false
+        Outputs:
+          - Name: convertedCount
+            Description: Number of rules successfully converted
+          - Name: convertedRules
+            Description: Detailed list of converted custom detection rules
+
+      - Name: DeployCustomDetections
+        DisplayName: Deploy XDR Custom Detection Rules
+        Description: >-
+          Converts eligible Sentinel analytic rules and deploys them as
+          custom detection rules in Microsoft 365 Defender.  Adapts KQL
+          queries for XDR compatibility (maps TimeGenerated to Timestamp,
+          ensures ReportId output, adjusts detection frequency).  Skips
+          rules that already exist in Defender XDR to prevent duplicates.
+        ExamplePrompts:
+          - Deploy Sentinel analytics as XDR custom detections
+          - Create XDR custom detection rules from my Sentinel analytics
+          - Push my Sentinel rules to Defender XDR as custom detections
+          - Deploy the converted detection rules to Microsoft 365 Defender
+        Inputs:
+          - Name: ruleIds
+            Description: >-
+              Optional list of specific Sentinel rule IDs to deploy.
+              If not provided, all eligible rules are deployed.
+            Required: false
+          - Name: prefix
+            Description: >-
+              Prefix for rule display names. Defaults to "[Sentinel] ".
+            Required: false
+          - Name: skipExisting
+            Description: >-
+              Whether to skip rules whose display name already exists in
+              Defender XDR.  Defaults to true.
+            Required: false
+        Outputs:
+          - Name: summary
+            Description: Deployment summary with counts of deployed, skipped, and failed rules
+          - Name: deployed
+            Description: List of successfully deployed rules with their new XDR rule IDs
+          - Name: failed
+            Description: List of rules that failed to deploy with error details

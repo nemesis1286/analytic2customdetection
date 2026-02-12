@@ -1,0 +1,13 @@
+{
+  "IsEncrypted": false,
+  "Values": {
+    "AzureWebJobsStorage": "UseDevelopmentStorage=true",
+    "FUNCTIONS_WORKER_RUNTIME": "python",
+    "AZURE_TENANT_ID": "<your-tenant-id>",
+    "AZURE_CLIENT_ID": "<your-client-id>",
+    "AZURE_CLIENT_SECRET": "<your-client-secret>",
+    "AZURE_SUBSCRIPTION_ID": "<your-subscription-id>",
+    "SENTINEL_RESOURCE_GROUP": "<your-resource-group>",
+    "SENTINEL_WORKSPACE_NAME": "<your-workspace-name>"
+  }
+}

@@ -1,0 +1,5 @@
+azure-functions>=1.17.0
+azure-identity>=1.15.0
+azure-mgmt-securityinsight>=2.0.0
+msal>=1.26.0
+requests>=2.31.0

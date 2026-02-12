@@ -1,0 +1,285 @@
+openapi: 3.0.3
+info:
+  title: Sentinel Analytic to XDR Custom Detection API
+  description: >-
+    API for scanning Microsoft Sentinel analytic rules, identifying those
+    that reference Defender XDR advanced hunting tables, and deploying
+    equivalent custom detection rules in Microsoft 365 Defender.
+  version: "1.0.0"
+  contact:
+    name: Security Operations
+
+servers:
+  - url: https://{functionAppName}.azurewebsites.net/api
+    description: Azure Function App
+    variables:
+      functionAppName:
+        default: analytic2customdetection
+        description: The Azure Function App name
+
+paths:
+  /scan:
+    post:
+      operationId: ScanAnalyticRules
+      summary: Scan Sentinel analytic rules for XDR table references
+      description: >-
+        Scans all active Sentinel analytic rules and identifies those whose
+        KQL queries reference Defender XDR advanced hunting tables.
+      responses:
+        "200":
+          description: Scan results
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ScanResponse"
+        "500":
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /convert:
+    post:
+      operationId: ConvertRules
+      summary: Convert Sentinel rules to XDR custom detections (dry run)
+      description: >-
+        Converts eligible Sentinel analytic rules to Defender XDR custom
+        detection rule format without deploying.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ConvertRequest"
+      responses:
+        "200":
+          description: Conversion results
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConvertResponse"
+        "500":
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /deploy:
+    post:
+      operationId: DeployCustomDetections
+      summary: Deploy custom detection rules to Defender XDR
+      description: >-
+        Converts and deploys Sentinel analytic rules as custom detection
+        rules in Microsoft 365 Defender.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DeployRequest"
+      responses:
+        "200":
+          description: Deployment results
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeployResponse"
+        "500":
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+components:
+  schemas:
+    ScanResponse:
+      type: object
+      properties:
+        totalActiveRules:
+          type: integer
+          description: Total number of active analytic rules
+        rulesWithXdrTables:
+          type: integer
+          description: Number of rules referencing XDR tables
+        rulesWithoutXdrTables:
+          type: integer
+          description: Number of rules not referencing XDR tables
+        eligibleRules:
+          type: array
+          items:
+            $ref: "#/components/schemas/EligibleRule"
+
+    EligibleRule:
+      type: object
+      properties:
+        ruleId:
+          type: string
+        displayName:
+          type: string
+        severity:
+          type: string
+          enum: [Informational, Low, Medium, High]
+        enabled:
+          type: boolean
+        xdrTables:
+          type: array
+          items:
+            type: object
+            properties:
+              table:
+                type: string
+              product:
+                type: string
+        primaryTable:
+          type: string
+          nullable: true
+        tactics:
+          type: array
+          items:
+            type: string
+        techniques:
+          type: array
+          items:
+            type: string
+        queryPreview:
+          type: string
+          description: First 500 characters of the KQL query
+
+    ConvertRequest:
+      type: object
+      properties:
+        ruleIds:
+          type: array
+          items:
+            type: string
+          description: Optional list of specific rule IDs to convert
+        prefix:
+          type: string
+          default: "[Sentinel] "
+          description: Display name prefix for converted rules
+
+    ConvertResponse:
+      type: object
+      properties:
+        eligibleRulesCount:
+          type: integer
+        convertedCount:
+          type: integer
+        skippedCount:
+          type: integer
+        convertedRules:
+          type: array
+          items:
+            $ref: "#/components/schemas/ConvertedRule"
+
+    ConvertedRule:
+      type: object
+      properties:
+        displayName:
+          type: string
+        severity:
+          type: string
+        frequency:
+          type: string
+        mitreTactics:
+          type: array
+          items:
+            type: string
+        mitreTechniques:
+          type: array
+          items:
+            type: string
+        sentinelRuleId:
+          type: string
+        queryText:
+          type: string
+        description:
+          type: string
+
+    DeployRequest:
+      type: object
+      properties:
+        ruleIds:
+          type: array
+          items:
+            type: string
+          description: Optional list of specific rule IDs to deploy
+        prefix:
+          type: string
+          default: "[Sentinel] "
+        skipExisting:
+          type: boolean
+          default: true
+          description: Skip rules that already exist in Defender XDR
+
+    DeployResponse:
+      type: object
+      properties:
+        summary:
+          type: object
+          properties:
+            eligibleRulesScanned:
+              type: integer
+            rulesConverted:
+              type: integer
+            deployed:
+              type: integer
+            skipped:
+              type: integer
+            failed:
+              type: integer
+        deployed:
+          type: array
+          items:
+            type: object
+            properties:
+              displayName:
+                type: string
+              ruleId:
+                type: string
+              sentinelRuleId:
+                type: string
+        skipped:
+          type: array
+          items:
+            type: object
+            properties:
+              displayName:
+                type: string
+              reason:
+                type: string
+        failed:
+          type: array
+          items:
+            type: object
+            properties:
+              displayName:
+                type: string
+              sentinelRuleId:
+                type: string
+              error:
+                type: string
+
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: string
+
+  securitySchemes:
+    functionKey:
+      type: apiKey
+      in: header
+      name: x-functions-key
+    oauth2:
+      type: oauth2
+      flows:
+        authorizationCode:
+          authorizationUrl: https://login.microsoftonline.com/common/oauth2/v2.0/authorize
+          tokenUrl: https://login.microsoftonline.com/common/oauth2/v2.0/token
+          scopes:
+            https://graph.microsoft.com/.default: Access Microsoft Graph
+            https://management.azure.com/.default: Access Azure Management API
