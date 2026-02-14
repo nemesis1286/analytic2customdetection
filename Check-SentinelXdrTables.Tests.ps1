@@ -653,6 +653,384 @@ foreach ($tactic in $allTacticsInput) {
 }
 
 # ============================================================================
+# TEST: Find-XdrTablesInQuery - Advanced Edge Cases
+# ============================================================================
+Write-TestSection "Find-XdrTablesInQuery - Advanced"
+
+# Verify comment-stripping: table in comment should NOT be found
+$result = Find-XdrTablesInQuery -Query @"
+// DeviceProcessEvents - commenting out this line
+DeviceNetworkEvents
+| where RemoteUrl has "malicious.com"
+"@
+$tableNames = $result | ForEach-Object { $_.TableName }
+Assert-False -Condition ($tableNames -contains "DeviceProcessEvents") `
+    -Message "Table in single-line comment not detected"
+Assert-True -Condition ($tableNames -contains "DeviceNetworkEvents") `
+    -Message "Table in active code IS detected"
+
+# Table name inside a string literal — word boundary still matches
+# (this is a known limitation; document the behavior)
+$result = Find-XdrTablesInQuery -Query @"
+DeviceProcessEvents
+| where ActionType == 'SomeAction'
+| extend note = 'see also DeviceFileEvents documentation'
+"@
+$tableNames = $result | ForEach-Object { $_.TableName }
+Assert-ArrayContains -Array $tableNames -Value "DeviceProcessEvents" `
+    -Message "Real table reference detected alongside string containing table name"
+
+# Query with only comments (all lines)
+$result = Find-XdrTablesInQuery -Query @"
+// DeviceProcessEvents
+// DeviceFileEvents
+// DeviceNetworkEvents
+"@
+Assert-Equal -Expected 0 -Actual @($result).Count `
+    -Message "All-comment query returns empty"
+
+# Query with let statement + table
+$result = Find-XdrTablesInQuery -Query @"
+let threshold = 5;
+let lookback = ago(24h);
+EmailEvents
+| where Timestamp > lookback
+| summarize count() by SenderFromAddress
+| where count_ > threshold
+"@
+$tableNames = $result | ForEach-Object { $_.TableName }
+Assert-ArrayContains -Array $tableNames -Value "EmailEvents" `
+    -Message "Table detected after let statement"
+Assert-Equal -Expected 1 -Actual @($result).Count `
+    -Message "Only one table found (let vars not confused for tables)"
+
+# Query with multiple identical table references — deduplication
+$result = Find-XdrTablesInQuery -Query @"
+DeviceProcessEvents
+| union DeviceProcessEvents
+| where FileName == 'cmd.exe'
+"@
+Assert-Equal -Expected 1 -Actual @($result).Count `
+    -Message "Duplicate table references deduplicated"
+
+# Every product area has at least one table in registry
+$productAreas = @(
+    "Microsoft Defender for Endpoint",
+    "Microsoft Defender for Office 365",
+    "Microsoft Defender for Identity",
+    "Microsoft Defender for Cloud Apps",
+    "Microsoft Defender XDR",
+    "Microsoft Entra ID",
+    "Microsoft Security Exposure Management"
+)
+foreach ($pa in $productAreas) {
+    $tablesForArea = @($XdrTableRegistry.GetEnumerator() | Where-Object { $_.Value -eq $pa })
+    Assert-True -Condition ($tablesForArea.Count -gt 0) `
+        -Message "Product area '$pa' has at least one table"
+}
+
+# Query with nested subqueries (parenthesized)
+$result = Find-XdrTablesInQuery -Query @"
+DeviceLogonEvents
+| where LogonType == "Interactive"
+| join kind=leftouter (
+    IdentityLogonEvents
+    | where Application == "Active Directory"
+    | project AccountUpn, LogonType
+) on `$left.AccountName == `$right.AccountUpn
+"@
+$tableNames = $result | ForEach-Object { $_.TableName }
+Assert-ArrayContains -Array $tableNames -Value "DeviceLogonEvents" `
+    -Message "Outer table in nested query"
+Assert-ArrayContains -Array $tableNames -Value "IdentityLogonEvents" `
+    -Message "Inner table in nested subquery"
+
+# ============================================================================
+# TEST: Convert-KqlForXdr - Advanced Edge Cases
+# ============================================================================
+Write-TestSection "Convert-KqlForXdr - Advanced"
+
+# TimeGenerated first in compound 'and' filter
+$adapted = Convert-KqlForXdr -Query @"
+DeviceProcessEvents
+| where TimeGenerated > ago(1h) and FileName == 'cmd.exe'
+"@
+Assert-NotContains -Haystack $adapted -Needle "TimeGenerated" `
+    -Message "TimeGenerated removed from compound 'and' filter (first position)"
+Assert-Contains -Haystack $adapted -Needle "FileName" `
+    -Message "Other condition preserved in compound filter"
+Assert-NotContains -Haystack ($adapted -split "`n" | Where-Object { $_.Trim().StartsWith("and ") }) -Needle "and" `
+    -Message "No orphaned 'and' at start of line"
+
+# TimeGenerated last in compound 'and' filter
+$adapted = Convert-KqlForXdr -Query @"
+DeviceProcessEvents
+| where FileName == 'cmd.exe' and TimeGenerated > ago(1h)
+"@
+Assert-NotContains -Haystack $adapted -Needle "TimeGenerated" `
+    -Message "TimeGenerated removed from compound 'and' filter (last position)"
+Assert-Contains -Haystack $adapted -Needle "FileName" `
+    -Message "Other condition preserved when TimeGenerated is last"
+
+# TimeGenerated with 'between' operator
+$adapted = Convert-KqlForXdr -Query @"
+DeviceEvents
+| where TimeGenerated between (ago(24h) .. ago(1h))
+"@
+# The between pattern is different from > ago(), the regex may not catch it
+# but TimeGenerated should be replaced with Timestamp at minimum
+Assert-NotContains -Haystack $adapted -Needle "TimeGenerated" `
+    -Message "TimeGenerated replaced in between clause"
+
+# ingestion_time() with <= operator
+$adapted = Convert-KqlForXdr -Query @"
+DeviceNetworkEvents
+| where ingestion_time() <= ago(1h)
+| where RemoteUrl has "evil.com"
+"@
+Assert-NotContains -Haystack $adapted -Needle "ingestion_time" `
+    -Message "ingestion_time with <= removed"
+Assert-Contains -Haystack $adapted -Needle "RemoteUrl" `
+    -Message "Detection logic preserved after ingestion_time removal"
+
+# Query with no pipe operators at all
+$adapted = Convert-KqlForXdr -Query "DeviceProcessEvents"
+Assert-Contains -Haystack $adapted -Needle "DeviceProcessEvents" `
+    -Message "Simple table-only query preserved"
+Assert-Contains -Haystack $adapted -Needle "Timestamp" `
+    -Message "Timestamp added to simple query"
+Assert-Contains -Haystack $adapted -Needle "ReportId" `
+    -Message "ReportId added to simple query"
+
+# Query with project-keep (should be treated like project)
+$adapted = Convert-KqlForXdr -Query @"
+DeviceProcessEvents
+| project-keep DeviceName, FileName
+"@
+Assert-Contains -Haystack $adapted -Needle "Timestamp" `
+    -Message "Timestamp added to project-keep"
+Assert-Contains -Haystack $adapted -Needle "ReportId" `
+    -Message "ReportId added to project-keep"
+
+# TimeGenerated in project should become Timestamp
+$adapted = Convert-KqlForXdr -Query @"
+DeviceProcessEvents
+| where FileName == 'cmd.exe'
+| project TimeGenerated, DeviceName, FileName
+"@
+Assert-NotContains -Haystack $adapted -Needle "TimeGenerated" `
+    -Message "TimeGenerated replaced in project clause"
+Assert-Contains -Haystack $adapted -Needle "Timestamp" `
+    -Message "Timestamp present in project clause"
+
+# project followed by order by — ReportId should go into project, not order by
+$adapted = Convert-KqlForXdr -Query @"
+DeviceProcessEvents
+| where FileName == 'cmd.exe'
+| project Timestamp, DeviceName, FileName
+| order by Timestamp desc
+"@
+Assert-Contains -Haystack $adapted -Needle "| project Timestamp, DeviceName, FileName, ReportId" `
+    -Message "ReportId added to project, not order by"
+Assert-NotContains -Haystack $adapted -Needle "order by Timestamp desc, ReportId" `
+    -Message "order by clause not polluted with ReportId"
+
+# project followed by more pipe operators
+$adapted = Convert-KqlForXdr -Query @"
+DeviceProcessEvents
+| project DeviceName, FileName
+| summarize count() by DeviceName
+"@
+Assert-Contains -Haystack $adapted -Needle "summarize count()" `
+    -Message "Subsequent summarize preserved after project fix"
+Assert-Contains -Haystack $adapted -Needle "Timestamp" `
+    -Message "Timestamp added to project before summarize"
+
+# Whitespace-heavy query
+$adapted = Convert-KqlForXdr -Query @"
+
+  DeviceProcessEvents
+
+  |   where   TimeGenerated   >   ago(1h)
+
+  |   where   FileName   ==   'cmd.exe'
+
+"@
+Assert-NotContains -Haystack $adapted -Needle "TimeGenerated" `
+    -Message "TimeGenerated removed even with extra whitespace"
+Assert-Contains -Haystack $adapted -Needle "FileName" `
+    -Message "Logic preserved in whitespace-heavy query"
+
+# ============================================================================
+# TEST: ConvertTo-XdrCustomDetection - Advanced Edge Cases
+# ============================================================================
+Write-TestSection "ConvertTo-XdrCustomDetection - Advanced"
+
+# Null description
+$nullDescRule = New-MockSentinelRule -Description ""
+$converted = ConvertTo-XdrCustomDetection -SentinelRule $nullDescRule -XdrTables $mockTables
+Assert-NotNull -Value $converted -Message "Null description rule converts"
+Assert-Contains -Haystack $converted.Description -Needle "[Auto-converted from Sentinel analytic rule" `
+    -Message "Provenance added even with empty description"
+
+# Empty prefix
+$converted = ConvertTo-XdrCustomDetection -SentinelRule $mockRule -XdrTables $mockTables -Prefix ""
+Assert-Equal -Expected "Test Detection Rule" -Actual $converted.DisplayName `
+    -Message "Empty prefix means no prefix on display name"
+
+# Multiple product areas in output
+$multiTables = [System.Collections.Generic.List[PSCustomObject]]::new()
+$multiTables.Add([PSCustomObject]@{ TableName = "DeviceProcessEvents"; ProductArea = "Microsoft Defender for Endpoint" })
+$multiTables.Add([PSCustomObject]@{ TableName = "EmailEvents"; ProductArea = "Microsoft Defender for Office 365" })
+$multiTables.Add([PSCustomObject]@{ TableName = "IdentityLogonEvents"; ProductArea = "Microsoft Defender for Identity" })
+
+$multiRule = New-MockSentinelRule -Query @"
+DeviceProcessEvents
+| union EmailEvents, IdentityLogonEvents
+| where Timestamp > ago(1h)
+"@
+$converted = ConvertTo-XdrCustomDetection -SentinelRule $multiRule -XdrTables $multiTables
+Assert-NotNull -Value $converted -Message "Multi-product-area rule converts"
+Assert-True -Condition ($converted.XdrTables.Count -ge 3) `
+    -Message "All 3 tables present (got $($converted.XdrTables.Count))"
+Assert-True -Condition ($converted.ProductAreas.Count -ge 3) `
+    -Message "All 3 product areas present (got $($converted.ProductAreas.Count))"
+
+# Unknown severity defaults to medium
+$unknownSevRule = New-MockSentinelRule -Severity "Critical"
+$converted = ConvertTo-XdrCustomDetection -SentinelRule $unknownSevRule -XdrTables $mockTables
+Assert-Equal -Expected "medium" -Actual $converted.Severity `
+    -Message "Unknown severity 'Critical' defaults to 'medium'"
+
+# Verify output object has all expected properties
+$expectedProps = @(
+    "DisplayName", "OriginalName", "SentinelRuleId", "RuleKind",
+    "QueryText", "OriginalQuery", "Frequency", "FrequencyLabel",
+    "Severity", "MitreTactics", "MitreTechniques", "Description",
+    "AlertCategory", "XdrTables", "ProductAreas", "RecommendedActions"
+)
+$converted = ConvertTo-XdrCustomDetection -SentinelRule $mockRule -XdrTables $mockTables
+$actualProps = @($converted.PSObject.Properties.Name)
+foreach ($prop in $expectedProps) {
+    Assert-ArrayContains -Array $actualProps -Value $prop `
+        -Message "Output has property '$prop'"
+}
+
+# Verify original query is preserved unmodified
+$originalQuery = "DeviceProcessEvents | where FileName == 'cmd.exe'"
+$ruleForOriginal = New-MockSentinelRule -Query $originalQuery
+$converted = ConvertTo-XdrCustomDetection -SentinelRule $ruleForOriginal -XdrTables $mockTables
+Assert-Equal -Expected $originalQuery -Actual $converted.OriginalQuery `
+    -Message "OriginalQuery preserved unmodified"
+
+# RecommendedActions is populated
+Assert-True -Condition ($converted.RecommendedActions.Length -gt 0) `
+    -Message "RecommendedActions is non-empty"
+
+# ============================================================================
+# TEST: ConvertTo-XdrFrequency - Boundary Precision
+# ============================================================================
+Write-TestSection "ConvertTo-XdrFrequency - Boundaries"
+
+# Exactly at boundary values
+Assert-Equal -Expected "PT1H" -Actual (ConvertTo-XdrFrequency -SentinelFrequency "PT60M") `
+    -Message "PT60M (exactly 1h) -> PT1H"
+Assert-Equal -Expected "PT3H" -Actual (ConvertTo-XdrFrequency -SentinelFrequency "PT61M") `
+    -Message "PT61M (just over 1h) -> PT3H"
+Assert-Equal -Expected "PT3H" -Actual (ConvertTo-XdrFrequency -SentinelFrequency "PT180M") `
+    -Message "PT180M (exactly 3h) -> PT3H"
+Assert-Equal -Expected "PT12H" -Actual (ConvertTo-XdrFrequency -SentinelFrequency "PT181M") `
+    -Message "PT181M (just over 3h) -> PT12H"
+Assert-Equal -Expected "PT12H" -Actual (ConvertTo-XdrFrequency -SentinelFrequency "PT720M") `
+    -Message "PT720M (exactly 12h) -> PT12H"
+Assert-Equal -Expected "PT24H" -Actual (ConvertTo-XdrFrequency -SentinelFrequency "PT721M") `
+    -Message "PT721M (just over 12h) -> PT24H"
+
+# Days + hours combination
+Assert-Equal -Expected "PT24H" -Actual (ConvertTo-XdrFrequency -SentinelFrequency "P1DT2H") `
+    -Message "P1DT2H (26h) -> PT24H"
+Assert-Equal -Expected "PT24H" -Actual (ConvertTo-XdrFrequency -SentinelFrequency "P7D") `
+    -Message "P7D (168h) -> PT24H"
+
+# Zero duration
+Assert-Equal -Expected "PT1H" -Actual (ConvertTo-XdrFrequency -SentinelFrequency "PT0M") `
+    -Message "PT0M (0h) -> PT1H"
+Assert-Equal -Expected "PT1H" -Actual (ConvertTo-XdrFrequency -SentinelFrequency "PT0H") `
+    -Message "PT0H (0h) -> PT1H"
+
+# ============================================================================
+# TEST: Registry Integrity Cross-Checks
+# ============================================================================
+Write-TestSection "Registry Integrity Cross-Checks"
+
+# Every table in the registry has a case-insensitive lookup entry
+foreach ($tableName in $XdrTableRegistry.Keys) {
+    $canonical = $XdrTableLookup[$tableName.ToLower()]
+    Assert-Equal -Expected $tableName -Actual $canonical `
+        -Message "XdrTableLookup[$($tableName.ToLower())] -> $tableName"
+}
+
+# Lookup table size matches registry size
+Assert-Equal -Expected $XdrTableRegistry.Count -Actual $XdrTableLookup.Count `
+    -Message "Lookup table size matches registry ($($XdrTableRegistry.Count))"
+
+# Exposure Management tables are a subset of the registry
+foreach ($emTable in $ExposureManagementTables) {
+    Assert-True -Condition $XdrTableRegistry.ContainsKey($emTable) `
+        -Message "Exposure table '$emTable' exists in main registry"
+    Assert-Equal -Expected "Microsoft Security Exposure Management" `
+        -Actual $XdrTableRegistry[$emTable] `
+        -Message "Exposure table '$emTable' has correct product area"
+}
+
+# TacticMap values are all lowercase-first-letter-of-each-word (camelCase)
+foreach ($key in $TacticMap.Keys) {
+    $value = $TacticMap[$key]
+    Assert-True -Condition ($value[0] -cmatch '[a-z]') `
+        -Message "TacticMap[$key] starts with lowercase: '$value'"
+}
+
+# ============================================================================
+# TEST: Script Structural Integrity
+# ============================================================================
+Write-TestSection "Script Structural Integrity"
+
+# Verify the main script has the expected section markers
+$mainScript = Get-Content -Path (Join-Path $PSScriptRoot "Check-SentinelXdrTables.ps1") -Raw
+Assert-Contains -Haystack $mainScript -Needle "# CONSTANTS & REGISTRIES" `
+    -Message "Has CONSTANTS & REGISTRIES section"
+Assert-Contains -Haystack $mainScript -Needle "# FUNCTIONS" `
+    -Message "Has FUNCTIONS section"
+Assert-Contains -Haystack $mainScript -Needle "# MAIN SCRIPT" `
+    -Message "Has MAIN SCRIPT section"
+Assert-Contains -Haystack $mainScript -Needle "[CmdletBinding()]" `
+    -Message "Has CmdletBinding attribute"
+Assert-Contains -Haystack $mainScript -Needle 'Set-StrictMode -Version Latest' `
+    -Message "Uses Set-StrictMode"
+Assert-Contains -Haystack $mainScript -Needle '$ErrorActionPreference = "Stop"' `
+    -Message "Uses Stop error action preference"
+
+# Verify parameter declarations exist
+Assert-Contains -Haystack $mainScript -Needle "SubscriptionId" `
+    -Message "Has SubscriptionId parameter"
+Assert-Contains -Haystack $mainScript -Needle "ResourceGroupName" `
+    -Message "Has ResourceGroupName parameter"
+Assert-Contains -Haystack $mainScript -Needle "WorkspaceName" `
+    -Message "Has WorkspaceName parameter"
+Assert-Contains -Haystack $mainScript -Needle "Translate" `
+    -Message "Has Translate parameter"
+Assert-Contains -Haystack $mainScript -Needle "Deploy" `
+    -Message "Has Deploy parameter"
+
+# Verify API version is recent
+Assert-Contains -Haystack $mainScript -Needle "2024-09-01" `
+    -Message "Uses recent Sentinel API version (2024-09-01)"
+
+# Verify Graph API endpoint
+Assert-Contains -Haystack $mainScript -Needle "graph.microsoft.com/v1.0/security/rules/detectionRules" `
+    -Message "Uses correct Graph API endpoint for detection rules"
+
+# ============================================================================
 # RESULTS
 # ============================================================================
 Write-Host ""

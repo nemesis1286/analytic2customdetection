@@ -366,7 +366,22 @@ function Convert-KqlForXdr {
     $adapted = $Query.Trim()
 
     # --- Remove Sentinel-specific time filters ---
-    # | where TimeGenerated > ago(1h)  /  >= ago(1d)  etc.
+    # Handle compound filters first:
+    # | where TimeGenerated > ago(1h) and <other conditions>
+    $adapted = [regex]::Replace(
+        $adapted,
+        'TimeGenerated\s*[><=!]+\s*ago\s*\([^)]+\)\s+and\s+',
+        '',
+        [System.Text.RegularExpressions.RegexOptions]::IgnoreCase
+    )
+    # | where <other conditions> and TimeGenerated > ago(1h)
+    $adapted = [regex]::Replace(
+        $adapted,
+        '\s+and\s+TimeGenerated\s*[><=!]+\s*ago\s*\([^)]+\)',
+        '',
+        [System.Text.RegularExpressions.RegexOptions]::IgnoreCase
+    )
+    # Standalone: | where TimeGenerated > ago(1h)
     $adapted = [regex]::Replace(
         $adapted,
         '\|\s*where\s+TimeGenerated\s*[><=!]+\s*ago\s*\([^)]+\)\s*',
@@ -381,7 +396,20 @@ function Convert-KqlForXdr {
         'Timestamp'
     )
 
-    # Remove ingestion_time() filters
+    # Handle compound ingestion_time() filters
+    $adapted = [regex]::Replace(
+        $adapted,
+        'ingestion_time\s*\(\s*\)\s*[><=!]+\s*ago\s*\([^)]+\)\s+and\s+',
+        '',
+        [System.Text.RegularExpressions.RegexOptions]::IgnoreCase
+    )
+    $adapted = [regex]::Replace(
+        $adapted,
+        '\s+and\s+ingestion_time\s*\(\s*\)\s*[><=!]+\s*ago\s*\([^)]+\)',
+        '',
+        [System.Text.RegularExpressions.RegexOptions]::IgnoreCase
+    )
+    # Standalone ingestion_time() filter
     $adapted = [regex]::Replace(
         $adapted,
         '\|\s*where\s+ingestion_time\s*\(\s*\)\s*[><=!]+\s*ago\s*\([^)]+\)\s*',
@@ -401,20 +429,24 @@ function Convert-KqlForXdr {
     if (-not $hasTimestamp) { $missing += "Timestamp" }
     if (-not $hasReportId)  { $missing += "ReportId" }
 
-    # Check if query ends with a project statement we can extend
-    $projectMatch = [regex]::Match(
+    # Find the last project/project-keep statement and extend it with
+    # missing columns. Use Multiline so $ matches end-of-line, not
+    # end-of-string (avoids capturing subsequent pipe operators).
+    $projectMatches = [regex]::Matches(
         $adapted,
         '(\|\s*project(?:-keep)?\s+)(.*?)$',
         ([System.Text.RegularExpressions.RegexOptions]::IgnoreCase -bor
-         [System.Text.RegularExpressions.RegexOptions]::Singleline)
+         [System.Text.RegularExpressions.RegexOptions]::Multiline)
     )
 
-    if ($projectMatch.Success) {
+    if ($projectMatches.Count -gt 0) {
+        $projectMatch = $projectMatches[$projectMatches.Count - 1]
         $existingCols = $projectMatch.Groups[2].Value.Trim()
         $newCols = $missing -join ", "
         $adapted = $adapted.Substring(0, $projectMatch.Index) +
                    $projectMatch.Groups[1].Value +
-                   $existingCols + ", " + $newCols
+                   $existingCols + ", " + $newCols +
+                   $adapted.Substring($projectMatch.Index + $projectMatch.Length)
     }
     else {
         # Append an extend to include required columns
