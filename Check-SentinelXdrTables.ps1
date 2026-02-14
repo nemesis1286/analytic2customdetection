@@ -226,15 +226,12 @@ $FrequencyDisplayMap = @{
 # ---------------------------------------------------------------------------
 # Sentinel -> XDR severity mapping
 # ---------------------------------------------------------------------------
+# PowerShell hashtables are case-insensitive, so only one casing needed.
 $SeverityMap = @{
     "Informational" = "informational"
     "Low"           = "low"
     "Medium"        = "medium"
     "High"          = "high"
-    "informational" = "informational"
-    "low"           = "low"
-    "medium"        = "medium"
-    "high"          = "high"
 }
 
 # ---------------------------------------------------------------------------
